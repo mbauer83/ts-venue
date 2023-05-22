@@ -1,6 +1,6 @@
 {
   "name": "@mbauer83/ts-venue",
-  "version": "0.1.0",
+  "version": "v0.1.0",
   "type": "module",
   "repository": "https://github.com/mbauer83/ts-venue.git",
   "dependencies": {
