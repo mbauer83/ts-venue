@@ -68,7 +68,7 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 				return new Left(new CommandDoesNotApplyToAggregateVersionError(this.constructor.name, this.id, command.appliesToVersion, this.version));
 			}
 
-			const evtPayload: BasicDomainEventPayload<VenueType> & {accessibility: boolean} = {accessibility: command.payload.accessibility, newAggregateVersion: this.version + 1, aggregateTypeName: 'Venue', aggregateId: this.id};
+			const evtPayload: BasicDomainEventPayload<VenueType> & {seatId: string; accessibility: boolean} = {accessibility: command.payload.accessibility, seatId: command.payload.seatId, newAggregateVersion: this.version + 1, aggregateTypeName: 'Venue', aggregateId: this.id};
 			const evt = new VenueSeatAccessibilityChanged(command.id, this.id, evtPayload, new Date(), 'test');
 			return new Right([evt as BasicDomainEvent<VenueType, VenueState, any>]) as Either<Error, Array<BasicDomainEvent<VenueType, VenueState, any>>>;
 		}
@@ -76,8 +76,8 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 		return new Left(new CommandNotHandledError(command.constructor.name, this.constructor.name));
 	}
 
-	protected withState(state: VenueState): Venue {
-		return new Venue(this.id, state);
+	protected withState(state: VenueState, newVersion: number): Venue {
+		return new Venue(this.id, state, newVersion);
 	}
 }
 
@@ -96,21 +96,24 @@ class CreateVenueSeat extends GenericInitializationCommand<VenueSeatType, VenueS
 	}
 }
 
-class SetVenueSeatAccessibility extends GenericBasicCommand<VenueType, VenueState, BasicCommandPayload<VenueType> & {accessibility: boolean}> {
-	constructor(id: string, aggregateId: string, appliesToVersion: number, createdAt: Date, issuer: string, public readonly accessibility: boolean) {
-		super(id, {aggregateTypeName: 'Venue', aggregateId, appliesToVersion, accessibility}, createdAt, issuer);
+class SetVenueSeatAccessibility extends GenericBasicCommand<VenueType, VenueState, BasicCommandPayload<VenueType> & {seatId: string; accessibility: boolean}> {
+	constructor(id: string, aggregateId: string, appliesToVersion: number, createdAt: Date, issuer: string, public readonly seatId: string, public readonly accessibility: boolean) {
+		super(id, {aggregateTypeName: 'Venue', seatId, aggregateId, appliesToVersion, accessibility}, createdAt, issuer);
 	}
 }
 
 // Define Events
 class VenueSeatAccessibilityChanged extends GenericBasicDomainEvent<VenueType, VenueState, BasicDomainEventPayload<VenueType> & {accessibility: boolean}> {
-	constructor(id: string, aggregateId: string, payload: BasicDomainEventPayload<VenueType> & {accessibility: boolean}, createdAt: Date, issuer: string) {
+	constructor(id: string, aggregateId: string, payload: BasicDomainEventPayload<VenueType> & {seatId: string; accessibility: boolean}, createdAt: Date, issuer: string) {
 		const applicator = (state: VenueState) => {
 			const sections = state.venueSections;
 			for (const section of sections) {
-				const seat = section.state.seats.find(seat => seat.id === aggregateId);
+				const seat = section.state.seats.find(seat => seat.id === payload.seatId);
 				if (seat) {
-					const newSeats = section.state.seats.map(seat => (seat.id === aggregateId ? new VenueSeat(seat.id, new VenueSeatState(payload.accessibility)) : seat));
+					const newSeats = section.state.seats.map(
+						seat =>
+							(seat.id === payload.seatId ? new VenueSeat(seat.id, new VenueSeatState(payload.accessibility), seat.version + 1) : seat),
+					);
 					const newSection = new VenueSection(section.id, new VenueSectionState(section.state.sectionName, newSeats), section.version + 1);
 					const newSections = state.venueSections.map(s => (s.id === section.id ? newSection : s));
 					return new VenueState(state.venueName, newSections);
@@ -143,10 +146,11 @@ const createSeatCommand02 = new CreateVenueSeat(
 
 const setSeat2Accessible = new SetVenueSeatAccessibility(
 	'set-seat-002-accessible',
-	'seat-002',
+	'venue-001',
 	0,
 	new Date(),
 	'test',
+	'seat-002',
 	true,
 );
 
@@ -169,10 +173,12 @@ class CreateSeatListener implements EventListener<VenueSeatType> {
 			const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).snapshot;
 			const serializedAggregate = JSON.stringify(instanceToPlain(aggregate));
 			console.log('venue seat created. id: [' + event.getAggregateId() + '] - entity: [' + serializedAggregate + ']');
+			console.log();
 			return;
 		}
 
 		console.log('venue seat updated. id: [' + event.getAggregateId() + ']');
+		console.log();
 	}
 }
 
@@ -189,7 +195,8 @@ const venue1 = new Venue('venue-001', new VenueState('venue-001', [venueSection1
 // Try to apply a command to the venue
 const changedVenueOrError = venue1.tryApplyCommand(setSeat2Accessible, defaultEventDispatcher);
 console.log('changedVenueOrError:');
-console.log(changedVenueOrError);
+console.log(JSON.stringify(changedVenueOrError));
+console.log();
 
 const noneString = new None<string>();
 const noneNumber = new None<number>();
@@ -199,19 +206,20 @@ const noneDate = new None<Date>();
 const allGenerator = inMemoryDomainEventStore.produceEventsForTypesAsync([['VenueSeat', noneString, noneNumber], ['Venue', noneString, noneNumber]], noneDate);
 const allGenAsRecord: Record<string, AsyncGenerator<DomainEvent<any, any, any>, void, any>> = allGenerator as unknown as Record<string, AsyncGenerator<DomainEvent<any, any, any>, void, any>>;
 const genKeys = Object.keys(allGenerator);
-console.log('genKeys:');
-console.log(genKeys);
+
 async function doIterate() {
 	const gen0 = allGenAsRecord.VenueSeat as AsyncGenerator<DomainEvent<VenueSeatType, VenueSeatState, any>, void, any>;
 	const gen1 = allGenAsRecord.Venue as AsyncGenerator<DomainEvent<VenueType, VenueState, any>, void, any>;
 	for await (const evt of gen0) {
 		console.log('Got event from async generator for VenueSeat');
-		console.log(evt);
+		console.log(JSON.stringify(evt));
+		console.log();
 	}
 
 	for await (const evt of gen1) {
 		console.log('Got event from async generator for Venue');
-		console.log(evt);
+		console.log(JSON.stringify(evt));
+		console.log();
 	}
 }
 
