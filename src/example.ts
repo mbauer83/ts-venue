@@ -69,7 +69,7 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 			}
 
 			const evtPayload: BasicDomainEventPayload<VenueType> & {accessibility: boolean} = {accessibility: command.payload.accessibility, newAggregateVersion: this.version + 1, aggregateTypeName: 'Venue', aggregateId: this.id};
-			const evt = new VenueSeatAccessibilityChangedVenue(command.id, this.id, evtPayload, new Date(), 'test');
+			const evt = new VenueSeatAccessibilityChanged(command.id, this.id, evtPayload, new Date(), 'test');
 			return new Right([evt as BasicDomainEvent<VenueType, VenueState, any>]) as Either<Error, Array<BasicDomainEvent<VenueType, VenueState, any>>>;
 		}
 
@@ -103,7 +103,7 @@ class SetVenueSeatAccessibility extends GenericBasicCommand<VenueType, VenueStat
 }
 
 // Define Events
-class VenueSeatAccessibilityChangedVenue extends GenericBasicDomainEvent<VenueType, VenueState, BasicDomainEventPayload<VenueType> & {accessibility: boolean}> {
+class VenueSeatAccessibilityChanged extends GenericBasicDomainEvent<VenueType, VenueState, BasicDomainEventPayload<VenueType> & {accessibility: boolean}> {
 	constructor(id: string, aggregateId: string, payload: BasicDomainEventPayload<VenueType> & {accessibility: boolean}, createdAt: Date, issuer: string) {
 		const applicator = (state: VenueState) => {
 			const sections = state.venueSections;
