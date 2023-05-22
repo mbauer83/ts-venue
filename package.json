@@ -2,6 +2,7 @@
   "name": "@mbauer83/ts-venue",
   "version": "0.1.0",
   "type": "module",
+  "repository": "https://github.com/mbauer83/ts-venue.git",
   "dependencies": {
     "@mbauer83/ts-eventsourcing": "^v0.4.3",
     "@mbauer83/ts-functional": "^0.3.2",
