@@ -1,11 +1,11 @@
 {
   "name": "@mbauer83/ts-venue",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "type": "module",
   "repository": "https://github.com/mbauer83/ts-venue.git",
   "dependencies": {
-    "@mbauer83/ts-eventsourcing": "^v0.4.3",
-    "@mbauer83/ts-functional": "^0.3.2",
+    "@mbauer83/ts-eventsourcing": "^v0.6.7",
+    "@mbauer83/ts-functional": "^0.7.4",
     "class-transformer": "^0.5.1",
     "reflect-metadata": "^0.1.13",
     "ts-node": "^10.9.1"
@@ -41,6 +41,7 @@
         "error",
         6
       ],
+      "eslint-comments/no-unused-disable": "off",
       "@typescript-eslint/consistent-type-definitions": "off",
       "unicorn/filename-case": "off",
       "unicorn/no-array-reduce": "off"
@@ -59,6 +60,7 @@
         "error",
         6
       ],
+      "eslint-comments/no-unused-disable": "off",
       "@typescript-eslint/consistent-type-definitions": "off",
       "unicorn/filename-case": "off",
       "unicorn/no-array-reduce": "off"

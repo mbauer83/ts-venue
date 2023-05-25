@@ -1,6 +1,8 @@
-import {BaseAggregate, type Aggregate, type AggregateType, AggregateMustBeCreatedFromFactoryError} from '@mbauer83/ts-eventsourcing/src/Aggregate.js';
+import {BaseAggregate, type Aggregate, type AggregateType} from '@mbauer83/ts-eventsourcing/src/Aggregate.js';
 import {type Command, CommandNotHandledError, CommandDoesNotApplyToAggregateVersionError, type BaseCommandPayload, GenericInitializationCommand, type BasicCommandPayload, GenericBasicCommand, type InitializationCommand, type InitializationCommandPayload} from '@mbauer83/ts-eventsourcing/src/Command.js';
 import {type Either, Left, Right} from '@mbauer83/ts-functional/src/Either.js';
+import {IO} from '@mbauer83/ts-functional/src/IO.js';
+import {AsyncIO} from '@mbauer83/ts-functional/src/AsyncIO.js';
 import {type EventDispatcher} from '@mbauer83/ts-eventsourcing/src/EventDispatcher.js';
 import {type DomainEvent, type InitializingDomainEvent, GenericInitializingDomainEvent, type BasicDomainEvent, GenericBasicDomainEvent, type BasicDomainEventPayload} from '@mbauer83/ts-eventsourcing/src/DomainEvent.js';
 import {InMemoryDomainEventStorage} from '@mbauer83/ts-eventsourcing/src/EventStorage.js';
@@ -8,9 +10,11 @@ import {type EventListener} from '@mbauer83/ts-eventsourcing/src/EventListener.j
 import {defaultEventDispatcher} from '@mbauer83/ts-eventsourcing/src/EventDispatcher.js';
 import {instanceToPlain} from 'class-transformer';
 import {None} from '@mbauer83/ts-functional/src/Optional.js';
+import {AsyncTask} from '@mbauer83/ts-functional/src/AsyncTask.js';
+import {type Task} from '@mbauer83/ts-functional/src/Task.js';
 
 // Define the types of three hierarchical aggregates: VenueSeat, VenueSection, and Venue.
-// Vanue is the aggregate root, VenueSection is a child of Venue, and VenueSeat is a child of VenueSection.
+// Venue is the aggregate root, VenueSection is a child of Venue, and VenueSeat is a child of VenueSection.
 type VenueSeatType = 'VenueSeat';
 type VenueSectionType = 'VenueSection';
 type VenueType = 'Venue';
@@ -85,8 +89,7 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 const venueSeatFromCommand = (c: CreateVenueSeat, dispatcher: EventDispatcher) => {
 	const agg = new VenueSeat(c.aggregateId, c.state);
 	const evt = new GenericInitializingDomainEvent(c.id, {aggregateTypeName: 'VenueSeat', aggregateId: c.aggregateId, snapshot: agg}, c.metadata);
-	dispatcher.dispatchEvents(evt);
-	return agg;
+	return [new IO<Aggregate<'VenueSeat', VenueSeatState>>(() => agg), dispatcher.dispatchEvents(evt)];
 };
 
 // Define Commands
@@ -97,6 +100,7 @@ class CreateVenueSeat extends GenericInitializationCommand<VenueSeatType, VenueS
 }
 
 class SetVenueSeatAccessibility extends GenericBasicCommand<VenueType, VenueState, BasicCommandPayload<VenueType> & {seatId: string; accessibility: boolean}> {
+	// eslint-disable-next-line max-params
 	constructor(id: string, aggregateId: string, appliesToVersion: number, createdAt: Date, issuer: string, public readonly seatId: string, public readonly accessibility: boolean) {
 		super(id, {aggregateTypeName: 'Venue', seatId, aggregateId, appliesToVersion, accessibility}, createdAt, issuer);
 	}
@@ -160,67 +164,100 @@ const inMemoryDomainEventStore = new InMemoryDomainEventStorage();
 class InMemoryEventStorageWriter implements EventListener<any> {
 	eventTypes = ['any'];
 	constructor(private readonly store: InMemoryDomainEventStorage) {}
-	async react(event: DomainEvent<any, any, any>) {
-		await this.store.storeEvents(event);
+	react(event: DomainEvent<any, any, any>) {
+		return this.store.storeEvents(event);
 	}
 }
 
 // Bootstrap EventListeners
 class CreateSeatListener implements EventListener<VenueSeatType> {
 	eventTypes = ['VenueSeat'] as VenueSeatType[];
-	async react(event: DomainEvent<VenueSeatType, any, any>) {
-		if (event.isInitial()) {
-			const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).snapshot;
-			const serializedAggregate = JSON.stringify(instanceToPlain(aggregate));
-			console.log('venue seat created. id: [' + event.getAggregateId() + '] - entity: [' + serializedAggregate + ']');
-			console.log();
-			return;
-		}
+	react(event: DomainEvent<VenueSeatType, any, any>) {
+		const resolver = async () => {
+			if (event.isInitial()) {
+				const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).snapshot;
+				const serializedAggregate = JSON.stringify(instanceToPlain(aggregate));
+				console.log('venue seat created. id: [' + event.getAggregateId() + '] - entity: [' + serializedAggregate + ']');
+				console.log();
+				return;
+			}
 
-		console.log('venue seat updated. id: [' + event.getAggregateId() + ']');
-		console.log();
+			console.log('venue seat updated. id: [' + event.getAggregateId() + ']');
+			console.log();
+		};
+
+		return new AsyncIO<void>(resolver);
 	}
 }
 
-defaultEventDispatcher.registerListeners(new InMemoryEventStorageWriter(inMemoryDomainEventStore), new CreateSeatListener());
+// ESLint seems to fail in IDE here, since neither `npm run lint`, nor `npm run build` nor `npm run scenario` report any problems
+// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+const taskToAsyncTask = <E, O>(t: Task<E, O>): AsyncTask<E, O> => new AsyncTask<E, O>(async () => t.evaluate());
+
+// Register listeners
+const registerListenersTask = defaultEventDispatcher.registerListeners(new InMemoryEventStorageWriter(inMemoryDomainEventStore), new CreateSeatListener());
 
 // Create two seats from initialization-commands
-const venueSeat1 = venueSeatFromCommand(createSeatCommand01, defaultEventDispatcher);
-const venueSeat2 = venueSeatFromCommand(createSeatCommand02, defaultEventDispatcher);
+const venueSeatCreateTuple1: [IO<VenueSeat>, Task<Error, void>] = venueSeatFromCommand(createSeatCommand01, defaultEventDispatcher) as [IO<VenueSeat>, Task<Error, void>];
+const venueSeatCreateTuple2: [IO<VenueSeat>, Task<Error, void>] = venueSeatFromCommand(createSeatCommand02, defaultEventDispatcher) as [IO<VenueSeat>, Task<Error, void>];
+const [venueSeat1, venueSeatCreateEventDispatchTask1] = venueSeatCreateTuple1;
+const [venueSeat2, venueSeatCreateEventDispatchTask2] = venueSeatCreateTuple2;
 
-// Create new section containing the seats and venue containing the section manually
-const venueSection1 = new VenueSection('section-001', new VenueSectionState('section-001', [venueSeat1, venueSeat2]));
-const venue1 = new Venue('venue-001', new VenueState('venue-001', [venueSection1]));
+// eslint-disable-next-line @typescript-eslint/naming-convention
+const createVenueSection1IO = venueSeat1.zip(venueSeat2).map(seats =>
+	new VenueSection('section-001', new VenueSectionState('section-001', [seats[0], seats[1]])),
+);
 
-// Try to apply a command to the venue
-const changedVenueOrError = venue1.tryApplyCommand(setSeat2Accessible, defaultEventDispatcher);
-console.log('changedVenueOrError:');
-console.log(JSON.stringify(changedVenueOrError));
-console.log();
+// eslint-disable-next-line @typescript-eslint/naming-convention
+const createVenue1IO: IO<Venue> = createVenueSection1IO.map(section =>
+	new Venue('venue-001', new VenueState('venue-001', [section])),
+);
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+const createEverythingIO = venueSeat1.thenDoIO(venueSeat2).thenDoIO(createVenueSection1IO).thenDoIO(createVenue1IO);
+
+// ESLint seems to fail here in IDE, since neither `npm run lint`, nor `npm run build` nor `npm run scenario` report any problems
+// eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-assignment
+const changedVenueOrError: Task<Error, void> = createVenue1IO.mapToTask((venue: Venue): Either<Error, void> =>
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+	venue.tryApplyCommand(setSeat2Accessible, defaultEventDispatcher).map((newAggregate: Aggregate<any, any>): void => {
+		console.log('changedVenue:');
+		console.log(JSON.stringify(newAggregate, null, 2));
+		console.log();
+		return undefined;
+	}).evaluate(),
+);
 
 const noneString = new None<string>();
 const noneNumber = new None<number>();
 const noneDate = new None<Date>();
 
 // Get async event-producing generators for VenueSeat and Venue, iterate over them and print results
-const allGenerator = inMemoryDomainEventStore.produceEventsForTypesAsync([['VenueSeat', noneString, noneNumber], ['Venue', noneString, noneNumber]], noneDate);
-const allGenAsRecord: Record<string, AsyncGenerator<DomainEvent<any, any, any>, void, any>> = allGenerator as unknown as Record<string, AsyncGenerator<DomainEvent<any, any, any>, void, any>>;
-const genKeys = Object.keys(allGenerator);
+const allGeneratorTask = inMemoryDomainEventStore.produceEventsForTypesAsync<['VenueSeat', 'Venue']>([['VenueSeat', noneString, noneNumber], ['Venue', noneString, noneNumber]], noneDate);
 
-async function doIterate() {
-	const gen0 = allGenAsRecord.VenueSeat as AsyncGenerator<DomainEvent<VenueSeatType, VenueSeatState, any>, void, any>;
-	const gen1 = allGenAsRecord.Venue as AsyncGenerator<DomainEvent<VenueType, VenueState, any>, void, any>;
-	for await (const evt of gen0) {
+allGeneratorTask.map(async gens => {
+	const gen0 = gens.VenueSeat as () => AsyncGenerator<DomainEvent<VenueSeatType, VenueSeatState, any>, void, any>;
+	const gen1 = gens.Venue as () => AsyncGenerator<DomainEvent<VenueType, VenueState, any>, void, any>;
+	for await (const evt of gen0()) {
 		console.log('Got event from async generator for VenueSeat');
 		console.log(JSON.stringify(evt));
 		console.log();
 	}
 
-	for await (const evt of gen1) {
+	for await (const evt of gen1()) {
 		console.log('Got event from async generator for Venue');
 		console.log(JSON.stringify(evt));
 		console.log();
 	}
-}
+});
 
-await doIterate();
+const composedProgram
+	= taskToAsyncTask(
+		createEverythingIO
+			.thenDoTask(registerListenersTask)
+			.thenDoTask(venueSeatCreateEventDispatchTask1)
+			.thenDoTask(venueSeatCreateEventDispatchTask2)
+			.thenDoTask(changedVenueOrError),
+	).thenDoTask(allGeneratorTask);
+
+await composedProgram.evaluate();
