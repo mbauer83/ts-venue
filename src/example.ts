@@ -1,4 +1,4 @@
-import {BaseAggregate, type Aggregate} from '@mbauer83/ts-eventsourcing/src/Aggregate.js';
+import {BaseAggregate, type Aggregate, type VersionRange} from '@mbauer83/ts-eventsourcing/src/Aggregate.js';
 import {
 	type Command,
 	CommandNotHandledError,
@@ -20,14 +20,20 @@ import {
 	type BasicDomainEvent,
 	GenericBasicDomainEvent,
 	type BasicDomainEventPayload,
+	isSnapshotDomainEvent,
+	isDomainEvent,
+	isBasicDomainEvent,
+	isInitializingDomainEvent,
 } from '@mbauer83/ts-eventsourcing/src/DomainEvent.js';
-import {InMemoryDomainEventStorage} from '@mbauer83/ts-eventsourcing/src/EventStorage.js';
+import {extractForQuery, type Query} from '@mbauer83/ts-eventsourcing/src/Query.js';
+import {type AggregateEventFilterData, InMemoryDomainEventStorage} from '@mbauer83/ts-eventsourcing/src/EventStorage.js';
 import {type EventListener} from '@mbauer83/ts-eventsourcing/src/EventListener.js';
 import {defaultEventDispatcher} from '@mbauer83/ts-eventsourcing/src/EventDispatcher.js';
 import {instanceToPlain} from 'class-transformer';
-import {None} from '@mbauer83/ts-functional/src/Optional.js';
+import {None, Some} from '@mbauer83/ts-functional/src/Optional.js';
 import {AsyncTask} from '@mbauer83/ts-functional/src/AsyncTask.js';
 import {type Task} from '@mbauer83/ts-functional/src/Task.js';
+import {type DateRange} from '@mbauer83/ts-utils/src/date/DateRange.js';
 
 /**  DEFINITIONS **/
 
@@ -52,7 +58,7 @@ class VenueSeat extends BaseAggregate<VenueSeatType, VenueSeatState> implements 
 		super('VenueSeat', id, state, version);
 	}
 
-	// Since commands are handled by the root, no events are emitted by this aggregate.
+	// Since commands are handled by the aggregate root, no events are emitted by this aggregate.
 	protected eventsForCommand<T extends BaseCommandPayload<VenueSeatType>>(command: Command<VenueSeatType, VenueSeatState, T>): Either<Error, Array<BasicDomainEvent<VenueSeatType, VenueSeatState, any>>> {
 		return new Left(new CommandNotHandledError(command.constructor.name, this.constructor.name));
 	}
@@ -63,7 +69,7 @@ class VenueSeat extends BaseAggregate<VenueSeatType, VenueSeatState> implements 
 }
 
 class VenueSectionState {
-	constructor(public readonly sectionName: string, public readonly seats: VenueSeat[]) {}
+	constructor(public readonly sectionName: string, public readonly seats: Record<string, VenueSeat>) {}
 }
 
 class VenueSection extends BaseAggregate<VenueSectionType, VenueSectionState> implements Aggregate<VenueSectionType, VenueSectionState> {
@@ -71,7 +77,7 @@ class VenueSection extends BaseAggregate<VenueSectionType, VenueSectionState> im
 		super('VenueSection', id, state, version);
 	}
 
-	// Since commands are handled by the root, no events are emitted by this aggregate.
+	// Since commands are handled by the aggregate root, no events are emitted by this aggregate.
 	protected eventsForCommand<T extends BaseCommandPayload<VenueSectionType>>(command: Command<VenueSectionType, VenueSectionState, T>): Either<Error, Array<BasicDomainEvent<VenueSectionType, VenueSectionState, any>>> {
 		return new Left(new CommandNotHandledError(command.constructor.name, this.constructor.name));
 	}
@@ -82,7 +88,7 @@ class VenueSection extends BaseAggregate<VenueSectionType, VenueSectionState> im
 }
 
 class VenueState {
-	constructor(public readonly venueName: string, public readonly venueSections: VenueSection[]) {}
+	constructor(public readonly venueName: string, public readonly venueSections: Record<string, VenueSection>) {}
 }
 
 class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<VenueType, VenueState> {
@@ -94,11 +100,14 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 		command: Command<VenueType, VenueState, T>,
 	): Either<Error, Array<BasicDomainEvent<VenueType, VenueState, any>>> {
 		if (command instanceof SetVenueSeatAccessibility) {
-			if (command.appliesToVersion !== this.version) {
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+			const appliesToVersion = command.appliesToVersion();
+			if (appliesToVersion !== this.version) {
 				return new Left(new CommandDoesNotApplyToAggregateVersionError(
 					this.constructor.name,
 					this.id,
-					command.appliesToVersion,
+					// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+					appliesToVersion,
 					this.version,
 				));
 			}
@@ -129,10 +138,12 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 
 // Helper function for creating a venueSeat from a CreateVenueSeat command
 const venueSeatFromCommand = (c: CreateVenueSeat, dispatcher: EventDispatcher) => {
-	const agg = new VenueSeat(c.aggregateId, c.state);
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call
+	const agg = new VenueSeat(c.getAggregateId(), c.getState());
 	const evt = new GenericInitializingDomainEvent(c.id, {
 		aggregateTypeName: 'VenueSeat',
-		aggregateId: c.aggregateId,
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+		aggregateId: c.getAggregateId(),
 		snapshot: agg,
 	}, c.metadata);
 	return [new IO<Aggregate<'VenueSeat', VenueSeatState>>(() => agg), dispatcher.dispatchEvents(evt)];
@@ -178,21 +189,18 @@ class VenueSeatAccessibilityChanged extends GenericBasicDomainEvent<VenueType, V
 		accessibility: boolean;
 	}, createdAt: Date, issuer: string) {
 		const applicator = (state: VenueState) => {
-			for (const section of state.venueSections) {
-				const seat = section.state.seats.find(seat => seat.id === payload.seatId);
+			for (const [sectionName, section] of Object.entries(state.venueSections)) {
+				const seat = section.state.seats[payload.seatId] ?? undefined;
 				if (seat) {
-					const newSeats = section.state.seats.map(
-						seat =>
-							(seat.id === payload.seatId
-								? new VenueSeat(seat.id, new VenueSeatState(payload.accessibility), seat.version + 1)
-								: seat),
-					);
+					const newSeats = {...section.state.seats};
+					newSeats[payload.seatId] = new VenueSeat(seat.id, new VenueSeatState(payload.accessibility), seat.version + 1);
 					const newSection = new VenueSection(
 						section.id,
 						new VenueSectionState(section.state.sectionName, newSeats),
 						section.version + 1,
 					);
-					const newSections = state.venueSections.map(s => (s.id === section.id ? newSection : s));
+					const newSections = {...state.venueSections};
+					newSections[section.id] = newSection;
 					return new VenueState(state.venueName, newSections);
 				}
 			}
@@ -208,6 +216,20 @@ class VenueSeatAccessibilityChanged extends GenericBasicDomainEvent<VenueType, V
 		}, applicator);
 	}
 }
+
+const getVenueCreatedEvent = (v: Venue) => new GenericInitializingDomainEvent('venue-created-001', {
+	aggregateTypeName: 'Venue',
+	aggregateId: v.id,
+	snapshot: v,
+}, {
+	issuer: 'test',
+	timestampMs: Date.now(),
+});
+
+const createAndPushVenueCreatedEventTask = (v: Venue): Task<Error, Venue> => {
+	const evt = getVenueCreatedEvent(v);
+	return defaultEventDispatcher.dispatchEvents(evt).map(() => v);
+};
 
 /**  SCENARIO **/
 
@@ -238,38 +260,47 @@ const setSeat2Accessible = new SetVenueSeatAccessibility(
 	true,
 );
 
+// Create Query for the accessible-property of seat 2 in section 1
+const queryForSeat2Accessibility: Query<VenueType, Venue> = {
+	targetType: 'Venue',
+	targetId: 'venue-001',
+	metadata: {timestampMs: Date.now(), issuer: 'test'},
+	extractionPathsWithLabels: [
+		['state.venueSections.section-001.state.seats.seat-002.state.accessible', 'seat2Accessibility'],
+	],
+};
+
 // Bootstrap EventStorage
 const inMemoryDomainEventStore = new InMemoryDomainEventStorage();
 
-class InMemoryEventStorageWriter implements EventListener<any> {
+class InMemoryEventStorageWriter implements EventListener<any, DomainEvent<any, any, any>> {
 	eventTypes = ['any'];
 
 	constructor(private readonly store: InMemoryDomainEventStorage) {}
 
 	react(event: DomainEvent<any, any, any>) {
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 		return this.store.storeEvents(event);
 	}
 }
 
 // Bootstrap EventListeners
-class CreateSeatListener implements EventListener<VenueSeatType> {
-	eventTypes = ['VenueSeat'] as VenueSeatType[];
+class CreateSeatListener implements EventListener<[VenueSeatType], DomainEvent<VenueSeatType, any, any>> {
+	eventTypes = ['VenueSeat'] as [VenueSeatType];
 
 	react(event: DomainEvent<VenueSeatType, any, any>) {
 		const resolver = async () => {
 			if (event.isInitial()) {
-				const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).snapshot;
+				// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+				const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).getSnapshot();
 				const serializedAggregate = JSON.stringify(instanceToPlain(aggregate));
-				console.log('venue seat created. id: [' + event.getAggregateId() + '] - entity: [' + serializedAggregate + ']');
-				console.log();
-				return;
+				return new Right<Error, void>(undefined);
 			}
 
-			console.log('venue seat updated. id: [' + event.getAggregateId() + ']');
-			console.log();
+			return new Right<Error, void>(undefined);
 		};
 
-		return new AsyncIO<void>(resolver);
+		return new AsyncTask<Error, void>(resolver);
 	}
 }
 
@@ -292,54 +323,127 @@ const [venueSeat1, venueSeatCreateEventDispatchTask1] = venueSeatCreateTuple1;
 const [venueSeat2, venueSeatCreateEventDispatchTask2] = venueSeatCreateTuple2;
 
 const createVenueSection1IO = venueSeat1.zip(venueSeat2).map(seats =>
-	new VenueSection('section-001', new VenueSectionState('section-001', [seats[0], seats[1]])),
+	new VenueSection('section-001', new VenueSectionState('section-001', {[seats[0].id]: seats[0], [seats[1].id]: seats[1]})),
 );
 
 const createVenue1IO: IO<Venue> = createVenueSection1IO.map(section =>
-	new Venue('venue-001', new VenueState('venue-001', [section])),
+	new Venue('venue-001', new VenueState('venue-001', {[section.id]: section})),
 );
 
-const createEverythingIO = venueSeat1.thenDoIO(venueSeat2).thenDoIO(createVenueSection1IO).thenDoIO(createVenue1IO);
+const createAndPushVenue1Task = createVenue1IO.mapToTask(venue => createAndPushVenueCreatedEventTask(venue).evaluate());
 
-const changedVenueOrError: Task<Error, void> = createVenue1IO.mapToTask((venue: Venue): Either<Error, void> =>
+const createEverythingTask = venueSeat1.thenDoIO(venueSeat2).thenDoIO(createVenueSection1IO).thenDoTask(createAndPushVenue1Task);
 
-	venue.tryApplyCommand(setSeat2Accessible, defaultEventDispatcher).map((newAggregate: Aggregate<any, any>): void => {
+const changedVenueOrError: Task<Error, Venue> = createVenue1IO.mapToTask((venue: Venue): Either<Error, Venue> =>
+	venue.tryApplyCommand(setSeat2Accessible, defaultEventDispatcher).map((newAggregate: Aggregate<any, any>): Venue => {
 		console.log('changedVenue:');
 		console.log(JSON.stringify(newAggregate, null, 2));
 		console.log();
-		return undefined;
+		return newAggregate as Venue;
 	}).evaluate(),
 );
 
-// Get async event-producing generators for VenueSeat and Venue, iterate over them and print results
-const allGeneratorTask = inMemoryDomainEventStore.produceEventsForTypesAsync<['VenueSeat', 'Venue']>(
-	[['VenueSeat', noneString, noneNumber], ['Venue', noneString, noneNumber]],
-	noneDate,
+// eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+const noneDateRange: None<DateRange> = None.for<DateRange>();
+// eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+const noneVersionRange: None<VersionRange> = None.for<VersionRange>();
+
+const getVenueFromMemoryAsyncTask = inMemoryDomainEventStore.produceEventsAsync({type: 'Venue', aggregateId: new Some<string>('venue-001'), dateRange: noneDateRange, versionRange: noneVersionRange}).flatMap<Venue>(
+	(gen): AsyncTask<Error, Venue> => {
+		let venue: Venue | undefined;
+		const consumeTask
+			= new AsyncTask<
+			Error,
+			[
+				InitializingDomainEvent<VenueType, VenueState, any>,
+				Array<BasicDomainEvent<VenueType, VenueState, any>>,
+			]>(
+				async () => {
+					let initialEvent: InitializingDomainEvent<VenueType, VenueState, any> | undefined;
+					const otherEvents: Array<BasicDomainEvent<VenueType, VenueState, any>> = [];
+					for await (const event of gen) {
+						// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+						if (isDomainEvent(event)) {
+							if (isInitializingDomainEvent(event)) {
+								initialEvent = event as InitializingDomainEvent<VenueType, VenueState, any>;
+							} else if (isBasicDomainEvent(event)) {
+								otherEvents.push(event as BasicDomainEvent<VenueType, VenueState, any>);
+							}
+						}
+					}
+
+					return (initialEvent === undefined)
+						? new Left(new Error('Could not find initial event for Venue 001'))
+						: new Right([initialEvent, otherEvents]);
+				});
+
+		return consumeTask.flatMap(tuple => {
+			const [initialEvent, otherEvents] = tuple;
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			return taskToAsyncTask(initialEvent.getSnapshot().withAppliedEvents(otherEvents) as Task<Error, Venue>);
+		});
+	},
 );
 
-allGeneratorTask.map(async gens => {
-	const gen0 = gens.VenueSeat as () => AsyncGenerator<DomainEvent<VenueSeatType, VenueSeatState, any>, void, any>;
-	const gen1 = gens.Venue as () => AsyncGenerator<DomainEvent<VenueType, VenueState, any>, void, any>;
-	for await (const evt of gen0()) {
+const performQueryBeforeChangeAsyncTask = getVenueFromMemoryAsyncTask.map(async venue => {
+	const extractionResult = extractForQuery(queryForSeat2Accessibility, venue);
+	console.log('Query result - venue seat 2 accessibility:');
+	console.log(JSON.stringify(extractionResult, null, 2));
+	return undefined;
+});
+
+const performQueryAfterChangeAsyncTask = performQueryBeforeChangeAsyncTask;
+
+// Get async event-producing generators for VenueSeat and Venue, iterate over them and print results
+const allGeneratorTask = inMemoryDomainEventStore.produceEventsForTypesAsync<['VenueSeat', 'Venue'], [AggregateEventFilterData<'VenueSeat'>, AggregateEventFilterData<'Venue'>]>(
+	[
+		{
+			type: 'VenueSeat',
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			aggregateId: None.for<string>() as None<string>,
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			dateRange: None.for<DateRange>() as None<DateRange>,
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			versionRange: None.for<VersionRange>() as None<VersionRange>,
+		},
+		{
+			type: 'Venue',
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			aggregateId: None.for<string>() as None<string>,
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			dateRange: None.for<DateRange>() as None<DateRange>,
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
+			versionRange: None.for<VersionRange>() as None<VersionRange>,
+		},
+	],
+);
+
+const consoleLoggingGeneratorTask = allGeneratorTask.map(async gens => {
+	const gen0 = gens.VenueSeat as AsyncGenerator<DomainEvent<VenueSeatType, VenueSeatState, any>, void, any>;
+	const gen1 = gens.Venue as AsyncGenerator<DomainEvent<VenueType, VenueState, any>, void, any>;
+	console.log('Getting events from async generators for VenueSeat and Venue');
+	for await (const evt of gen0) {
 		console.log('Got event from async generator for VenueSeat');
-		console.log(JSON.stringify(evt));
+		console.log(JSON.stringify(evt, null, 2));
 		console.log();
 	}
 
-	for await (const evt of gen1()) {
+	for await (const evt of gen1) {
 		console.log('Got event from async generator for Venue');
-		console.log(JSON.stringify(evt));
+		console.log(JSON.stringify(evt, null, 2));
 		console.log();
 	}
 });
 
 const composedProgram
     = taskToAsyncTask(
-    	createEverythingIO
-    		.thenDoTask(registerListenersTask)
+    		registerListenersTask
+    		.thenDoTask(createEverythingTask)
     		.thenDoTask(venueSeatCreateEventDispatchTask1)
     		.thenDoTask(venueSeatCreateEventDispatchTask2)
     		.thenDoTask(changedVenueOrError),
-    ).thenDoTask(allGeneratorTask);
+    	)
+    	.thenDoTask(consoleLoggingGeneratorTask)
+    	.thenDoTask(performQueryAfterChangeAsyncTask);
 
 await composedProgram.evaluate();
