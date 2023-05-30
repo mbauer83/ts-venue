@@ -11,7 +11,6 @@ import {
 } from '@mbauer83/ts-eventsourcing/src/Command.js';
 import {type Either, Left, Right} from '@mbauer83/ts-functional/src/Either.js';
 import {IO} from '@mbauer83/ts-functional/src/IO.js';
-import {AsyncIO} from '@mbauer83/ts-functional/src/AsyncIO.js';
 import {type EventDispatcher} from '@mbauer83/ts-eventsourcing/src/EventDispatcher.js';
 import {
 	type DomainEvent,
@@ -20,7 +19,6 @@ import {
 	type BasicDomainEvent,
 	GenericBasicDomainEvent,
 	type BasicDomainEventPayload,
-	isSnapshotDomainEvent,
 	isDomainEvent,
 	isBasicDomainEvent,
 	isInitializingDomainEvent,
@@ -39,9 +37,8 @@ import {type DateRange} from '@mbauer83/ts-utils/src/date/DateRange.js';
 
 const taskToAsyncTask = <E, O>(t: Task<E, O>): AsyncTask<E, O> => new AsyncTask<E, O>(async () => t.evaluate());
 
-const noneString = new None<string>();
-const noneNumber = new None<number>();
-const noneDate = new None<Date>();
+const noneDateRange: None<DateRange> = None.for<DateRange>();
+const noneVersionRange: None<VersionRange> = None.for<VersionRange>();
 
 // Define the types of three hierarchical aggregates: VenueSeat, VenueSection, and Venue.
 // Venue is the aggregate root, VenueSection is a child of Venue, and VenueSeat is a child of VenueSection.
@@ -100,13 +97,11 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 		command: Command<VenueType, VenueState, T>,
 	): Either<Error, Array<BasicDomainEvent<VenueType, VenueState, any>>> {
 		if (command instanceof SetVenueSeatAccessibility) {
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 			const appliesToVersion = command.appliesToVersion();
 			if (appliesToVersion !== this.version) {
 				return new Left(new CommandDoesNotApplyToAggregateVersionError(
 					this.constructor.name,
 					this.id,
-					// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 					appliesToVersion,
 					this.version,
 				));
@@ -138,11 +133,9 @@ class Venue extends BaseAggregate<VenueType, VenueState> implements Aggregate<Ve
 
 // Helper function for creating a venueSeat from a CreateVenueSeat command
 const venueSeatFromCommand = (c: CreateVenueSeat, dispatcher: EventDispatcher) => {
-	// eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call
 	const agg = new VenueSeat(c.getAggregateId(), c.getState());
 	const evt = new GenericInitializingDomainEvent(c.id, {
 		aggregateTypeName: 'VenueSeat',
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
 		aggregateId: c.getAggregateId(),
 		snapshot: agg,
 	}, c.metadata);
@@ -233,6 +226,8 @@ const createAndPushVenueCreatedEventTask = (v: Venue): Task<Error, Venue> => {
 
 /**  SCENARIO **/
 
+// SETUP
+
 // Construct commands
 const createSeatCommand01 = new CreateVenueSeat(
 	'create-seat-command-001',
@@ -279,7 +274,6 @@ class InMemoryEventStorageWriter implements EventListener<any, DomainEvent<any, 
 	constructor(private readonly store: InMemoryDomainEventStorage) {}
 
 	react(event: DomainEvent<any, any, any>) {
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 		return this.store.storeEvents(event);
 	}
 }
@@ -291,7 +285,6 @@ class CreateSeatListener implements EventListener<[VenueSeatType], DomainEvent<V
 	react(event: DomainEvent<VenueSeatType, any, any>) {
 		const resolver = async () => {
 			if (event.isInitial()) {
-				// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
 				const aggregate = (event as InitializingDomainEvent<VenueSeatType, VenueSeatState, any>).getSnapshot();
 				const serializedAggregate = JSON.stringify(instanceToPlain(aggregate));
 				return new Right<Error, void>(undefined);
@@ -322,6 +315,7 @@ const venueSeatCreateTuple2: [IO<VenueSeat>, Task<Error, void>] = venueSeatFromC
 const [venueSeat1, venueSeatCreateEventDispatchTask1] = venueSeatCreateTuple1;
 const [venueSeat2, venueSeatCreateEventDispatchTask2] = venueSeatCreateTuple2;
 
+// Define IOs and Tasks
 const createVenueSection1IO = venueSeat1.zip(venueSeat2).map(seats =>
 	new VenueSection('section-001', new VenueSectionState('section-001', {[seats[0].id]: seats[0], [seats[1].id]: seats[1]})),
 );
@@ -343,11 +337,6 @@ const changedVenueOrError: Task<Error, Venue> = createVenue1IO.mapToTask((venue:
 	}).evaluate(),
 );
 
-// eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
-const noneDateRange: None<DateRange> = None.for<DateRange>();
-// eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
-const noneVersionRange: None<VersionRange> = None.for<VersionRange>();
-
 const getVenueFromMemoryAsyncTask = inMemoryDomainEventStore.produceEventsAsync({type: 'Venue', aggregateId: new Some<string>('venue-001'), dateRange: noneDateRange, versionRange: noneVersionRange}).flatMap<Venue>(
 	(gen): AsyncTask<Error, Venue> => {
 		let venue: Venue | undefined;
@@ -362,7 +351,6 @@ const getVenueFromMemoryAsyncTask = inMemoryDomainEventStore.produceEventsAsync(
 					let initialEvent: InitializingDomainEvent<VenueType, VenueState, any> | undefined;
 					const otherEvents: Array<BasicDomainEvent<VenueType, VenueState, any>> = [];
 					for await (const event of gen) {
-						// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 						if (isDomainEvent(event)) {
 							if (isInitializingDomainEvent(event)) {
 								initialEvent = event as InitializingDomainEvent<VenueType, VenueState, any>;
@@ -379,7 +367,6 @@ const getVenueFromMemoryAsyncTask = inMemoryDomainEventStore.produceEventsAsync(
 
 		return consumeTask.flatMap(tuple => {
 			const [initialEvent, otherEvents] = tuple;
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 			return taskToAsyncTask(initialEvent.getSnapshot().withAppliedEvents(otherEvents) as Task<Error, Venue>);
 		});
 	},
@@ -399,21 +386,15 @@ const allGeneratorTask = inMemoryDomainEventStore.produceEventsForTypesAsync<['V
 	[
 		{
 			type: 'VenueSeat',
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			aggregateId: None.for<string>() as None<string>,
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			dateRange: None.for<DateRange>() as None<DateRange>,
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			versionRange: None.for<VersionRange>() as None<VersionRange>,
+			aggregateId: None.for<string>(),
+			dateRange: None.for<DateRange>(),
+			versionRange: None.for<VersionRange>(),
 		},
 		{
 			type: 'Venue',
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			aggregateId: None.for<string>() as None<string>,
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			dateRange: None.for<DateRange>() as None<DateRange>,
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
-			versionRange: None.for<VersionRange>() as None<VersionRange>,
+			aggregateId: None.for<string>(),
+			dateRange: None.for<DateRange>(),
+			versionRange: None.for<VersionRange>(),
 		},
 	],
 );
@@ -435,6 +416,7 @@ const consoleLoggingGeneratorTask = allGeneratorTask.map(async gens => {
 	}
 });
 
+// Compose program
 const composedProgram
     = taskToAsyncTask(
     		registerListenersTask
@@ -446,4 +428,8 @@ const composedProgram
     	.thenDoTask(consoleLoggingGeneratorTask)
     	.thenDoTask(performQueryAfterChangeAsyncTask);
 
+// Nothing has been executed so far -
+// all effects happen at the edge of the application
+// when this next line is executed.
 await composedProgram.evaluate();
+
