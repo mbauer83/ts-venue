@@ -1,4 +1,5 @@
 import {BaseAggregate, type Aggregate, type VersionRange} from '@mbauer83/ts-eventsourcing/src/Aggregate.js';
+import {AggregateReadRepository} from '@mbauer83/ts-eventsourcing/src/AggregateReadRepository.js';
 import {
 	type Command,
 	CommandNotHandledError,
@@ -11,6 +12,7 @@ import {
 } from '@mbauer83/ts-eventsourcing/src/Command.js';
 import {type Either, Left, Right} from '@mbauer83/ts-functional/src/Either.js';
 import {IO} from '@mbauer83/ts-functional/src/IO.js';
+import {AsyncIO} from '@mbauer83/ts-functional/src/AsyncIO.js';
 import {type EventDispatcher} from '@mbauer83/ts-eventsourcing/src/EventDispatcher.js';
 import {
 	type DomainEvent,
@@ -42,10 +44,14 @@ const noneVersionRange: None<VersionRange> = None.for<VersionRange>();
 
 // Define the types of three hierarchical aggregates: VenueSeat, VenueSection, and Venue.
 // Venue is the aggregate root, VenueSection is a child of Venue, and VenueSeat is a child of VenueSection.
+
+// Aggregate-types are reified as strings-literal types, so we can use them as type parameters.
 type VenueSeatType = 'VenueSeat';
 type VenueSectionType = 'VenueSection';
 type VenueType = 'Venue';
 
+// Aggregates are parameterized by their aggregate-type-name and their state-type,
+// so these can be replaced independently of the surrounding aggregate-logic.
 class VenueSeatState {
 	constructor(public readonly accessible: boolean) {}
 }
@@ -337,40 +343,8 @@ const changedVenueOrError: Task<Error, Venue> = createVenue1IO.mapToTask((venue:
 	}).evaluate(),
 );
 
-const getVenueFromMemoryAsyncTask = inMemoryDomainEventStore.produceEventsAsync({type: 'Venue', aggregateId: new Some<string>('venue-001'), dateRange: noneDateRange, versionRange: noneVersionRange}).flatMap<Venue>(
-	(gen): AsyncTask<Error, Venue> => {
-		let venue: Venue | undefined;
-		const consumeTask
-			= new AsyncTask<
-			Error,
-			[
-				InitializingDomainEvent<VenueType, VenueState, any>,
-				Array<BasicDomainEvent<VenueType, VenueState, any>>,
-			]>(
-				async () => {
-					let initialEvent: InitializingDomainEvent<VenueType, VenueState, any> | undefined;
-					const otherEvents: Array<BasicDomainEvent<VenueType, VenueState, any>> = [];
-					for await (const event of gen) {
-						if (isDomainEvent(event)) {
-							if (isInitializingDomainEvent(event)) {
-								initialEvent = event as InitializingDomainEvent<VenueType, VenueState, any>;
-							} else if (isBasicDomainEvent(event)) {
-								otherEvents.push(event as BasicDomainEvent<VenueType, VenueState, any>);
-							}
-						}
-					}
-
-					return (initialEvent === undefined)
-						? new Left(new Error('Could not find initial event for Venue 001'))
-						: new Right([initialEvent, otherEvents]);
-				});
-
-		return consumeTask.flatMap(tuple => {
-			const [initialEvent, otherEvents] = tuple;
-			return taskToAsyncTask(initialEvent.getSnapshot().withAppliedEvents(otherEvents) as Task<Error, Venue>);
-		});
-	},
-);
+const venueReadRepository = new AggregateReadRepository<VenueType, Venue>('Venue', inMemoryDomainEventStore);
+const getVenueFromMemoryAsyncTask = taskToAsyncTask(venueReadRepository.get('venue-001'));
 
 const performQueryBeforeChangeAsyncTask = getVenueFromMemoryAsyncTask.map(async venue => {
 	const extractionResult = extractForQuery(queryForSeat2Accessibility, venue);
@@ -416,6 +390,10 @@ const consoleLoggingGeneratorTask = allGeneratorTask.map(async gens => {
 	}
 });
 
+const printDoneIO = new AsyncIO<void>(async () => {
+	console.log('Done');
+});
+
 // Compose program
 const composedProgram
     = taskToAsyncTask(
@@ -426,10 +404,12 @@ const composedProgram
     		.thenDoTask(changedVenueOrError),
     	)
     	.thenDoTask(consoleLoggingGeneratorTask)
-    	.thenDoTask(performQueryAfterChangeAsyncTask);
+    	.thenDoTask(performQueryAfterChangeAsyncTask)
+    	.thenDoIO(printDoneIO);
 
+console.log('starting execution...');
 // Nothing has been executed so far -
 // all effects happen at the edge of the application
 // when this next line is executed.
-await composedProgram.evaluate();
-
+void composedProgram.evaluate();
+console.log('after call to `composedProgram.evaluate`'); // This will be printed before all effects have executed
